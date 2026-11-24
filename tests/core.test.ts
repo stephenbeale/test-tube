@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { diffTags, diffVideo, type Tracked } from "../src/lib/diff";
 import { aggregate, computeImpact, type Day } from "../src/lib/impact";
 import { addDays, daysBetween } from "../src/lib/dates";
-import { normaliseCtr } from "../src/lib/youtube";
+import { getVideos, listUploadIds, normaliseCtr } from "../src/lib/youtube";
 
 const base: Tracked = { title: "A", description: "d", tags: ["x"], categoryId: "28", privacyStatus: "public", thumbnailHash: "h1" };
 const day = (date: string, impressions: number | null, ctr: number | null, views = 100): Day => ({ date, views, watchMinutes: views * 2, avgViewDuration: 120, subsGained: 0, impressions, ctr });
@@ -59,4 +59,30 @@ test("normaliseCtr converts ratios to percentages and leaves percentages alone",
 test("date helpers cross month boundaries", () => {
   assert.equal(addDays("2026-03-01", -1), "2026-02-28");
   assert.equal(daysBetween("2026-02-27", "2026-03-02"), 3);
+});
+
+test("listUploadIds and getVideos drop videos repeated across playlist pages", async () => {
+  // Page 3 repeats a video from page 1, as the real uploads playlist was seen to do.
+  const pages = [["a", "b"], ["c", "d"], ["a", "e"]];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/playlistItems")) {
+      const n = Number(url.searchParams.get("pageToken") ?? 0);
+      const body = { items: pages[n].map((videoId) => ({ contentDetails: { videoId } })), nextPageToken: n + 1 < pages.length ? String(n + 1) : undefined };
+      return new Response(JSON.stringify(body), { status: 200 });
+    }
+    const ids = url.searchParams.get("id")!.split(",");
+    // Return each requested id twice to prove getVideos also de-duplicates the response.
+    const items = [...ids, ...ids].map((id) => ({ id, snippet: { title: id } }));
+    return new Response(JSON.stringify({ items }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const ids = await listUploadIds("t", "UU1", 5);
+    assert.deepEqual(ids, ["a", "b", "c", "d", "e"]);
+    const videos = await getVideos("t", ["a", "a", "b"]);
+    assert.deepEqual(videos.map((v) => v.id), ["a", "b"]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });

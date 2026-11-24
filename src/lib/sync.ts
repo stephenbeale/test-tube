@@ -53,8 +53,20 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
 
 export type SyncResult = { videos: number; newChanges: number; metricVideos: number };
 
+// One sync per channel at a time in this process. The sign-in callback starts a sync in the background,
+// and pressing "Sync now" while it runs would otherwise diff against the same snapshot twice.
+const inFlight = new Map<string, Promise<SyncResult>>();
+
 /** Snapshot the channel's videos, record what changed, and refresh daily analytics. */
-export async function syncChannel(channelId: string): Promise<SyncResult> {
+export function syncChannel(channelId: string): Promise<SyncResult> {
+  const running = inFlight.get(channelId);
+  if (running) return running;
+  const p = syncOnce(channelId).finally(() => inFlight.delete(channelId));
+  inFlight.set(channelId, p);
+  return p;
+}
+
+async function syncOnce(channelId: string): Promise<SyncResult> {
   const c = await db();
   try {
     const result = await runSync(channelId);
@@ -98,7 +110,7 @@ async function runSync(channelId: string): Promise<SyncResult> {
     if (!prev) {
       // First sighting is the baseline, not a change.
       stmts.push({
-        sql: "INSERT INTO videos (id, channel_id, title, description, tags, category_id, privacy_status, published_at, thumbnail_hash, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        sql: "INSERT INTO videos (id, channel_id, title, description, tags, category_id, privacy_status, published_at, thumbnail_hash, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
         args: [v.id, channelId, v.title, v.description, JSON.stringify(v.tags), v.categoryId, v.privacyStatus, v.publishedAt, thumb?.hash ?? null, nowIso],
       });
       return;
