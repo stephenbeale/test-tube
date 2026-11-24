@@ -30,20 +30,25 @@ export async function getMyChannel(token: string): Promise<ChannelInfo | null> {
   return c ? { id: c.id, title: c.snippet.title, uploadsPlaylistId: c.contentDetails.relatedPlaylists.uploads } : null;
 }
 
-/** Newest-first video ids from the uploads playlist. 1 quota unit per 50 videos. */
+/**
+ * Newest-first, de-duplicated video ids from the uploads playlist. 1 quota unit per 50 videos.
+ * Deeper pages of an uploads playlist can repeat videos from earlier pages, so ids are collected
+ * into a set and paging continues (up to a fixed page budget) until `max` distinct ids are found.
+ */
 export async function listUploadIds(token: string, playlistId: string, max: number): Promise<string[]> {
-  const ids: string[] = [];
+  const ids = new Set<string>();
+  const maxPages = Math.max(4, Math.ceil(max / 50) * 2);
   let pageToken = "";
-  while (ids.length < max) {
+  for (let page = 0; page < maxPages && ids.size < max; page++) {
     const r = await get<{ items: { contentDetails: { videoId: string } }[]; nextPageToken?: string }>(
       `${DATA}/playlistItems?part=contentDetails&maxResults=50&playlistId=${playlistId}${pageToken && `&pageToken=${pageToken}`}`,
       token,
     );
-    ids.push(...r.items.map((i) => i.contentDetails.videoId));
+    for (const i of r.items) ids.add(i.contentDetails.videoId);
     if (!r.nextPageToken) break;
     pageToken = r.nextPageToken;
   }
-  return ids.slice(0, max);
+  return [...ids].slice(0, max);
 }
 
 export type VideoState = {
@@ -70,11 +75,15 @@ type ApiVideo = {
   status?: { privacyStatus?: string };
 };
 
-export async function getVideos(token: string, ids: string[]): Promise<VideoState[]> {
+export async function getVideos(token: string, requested: string[]): Promise<VideoState[]> {
+  const ids = [...new Set(requested)];
+  const seen = new Set<string>();
   const out: VideoState[] = [];
   for (let i = 0; i < ids.length; i += 50) {
     const r = await get<{ items: ApiVideo[] }>(`${DATA}/videos?part=snippet,status&maxResults=50&id=${ids.slice(i, i + 50).join(",")}`, token);
     for (const v of r.items) {
+      if (seen.has(v.id)) continue;
+      seen.add(v.id);
       out.push({
         id: v.id,
         title: v.snippet.title,
