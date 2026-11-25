@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { signOut } from "@/app/actions";
+import { signOut, switchChannel } from "@/app/actions";
 import { FIELD_LABEL, fmtDelta, fmtMetric } from "@/lib/format";
 import { METRICS, MIN_DAYS, type Impact, type MetricKey } from "@/lib/impact";
 import type { Channel } from "@/lib/session";
@@ -25,13 +25,47 @@ export function Header({ channel }: { channel: Channel }) {
         <Link href="/dashboard">
           <Logo />
         </Link>
-        <span className="min-w-0 flex-1 truncate text-sm text-muted">{channel.title}</span>
+        <div className="min-w-0 flex-1">{channel.isDemo ? <span className="truncate text-sm text-muted">{channel.title}</span> : <ChannelSwitcher channel={channel} />}</div>
         {!channel.isDemo && <SyncButton />}
         <form action={signOut}>
           <button className="text-sm text-muted hover:text-ink">{channel.isDemo ? "Exit demo" : "Sign out"}</button>
         </form>
       </div>
     </header>
+  );
+}
+
+/** A <details> menu works without client JS; each channel is a form button. */
+function ChannelSwitcher({ channel }: { channel: Channel }) {
+  return (
+    <details className="group relative inline-block max-w-full">
+      <summary className="flex max-w-full cursor-pointer list-none items-center gap-1 rounded-md px-2 py-1 text-sm text-muted hover:bg-line/50 hover:text-ink [&::-webkit-details-marker]:hidden">
+        <span className="truncate">{channel.title}</span>
+        <svg viewBox="0 0 12 12" className="size-3 shrink-0 transition-transform group-open:rotate-180" aria-hidden>
+          <path d="M3 4.5 6 7.5 9 4.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </summary>
+      <div className="absolute left-0 z-20 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-line bg-surface p-1 shadow-lg">
+        <form action={switchChannel}>
+          {channel.channels.map((c) => (
+            <button
+              key={c.id}
+              name="channelId"
+              value={c.id}
+              aria-current={c.id === channel.id ? "true" : undefined}
+              className="flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-line/50 aria-[current]:font-medium"
+            >
+              <span className="truncate">{c.title}</span>
+              {c.id === channel.id && <span className="text-accent" aria-hidden>✓</span>}
+            </button>
+          ))}
+        </form>
+        <div className="my-1 border-t border-line" />
+        <a href="/api/auth/google?add=1" className="block rounded-md px-3 py-2 text-sm text-muted hover:bg-line/50 hover:text-ink">
+          + Add another channel
+        </a>
+      </div>
+    </details>
   );
 }
 

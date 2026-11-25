@@ -21,7 +21,8 @@ export function authUrl(origin: string, state: string): string {
     response_type: "code",
     scope: SCOPES.join(" "),
     access_type: "offline", // we need a refresh token for background syncs
-    prompt: "consent",
+    // select_account: always show the account/brand-channel picker so another channel can be added.
+    prompt: "select_account consent",
     include_granted_scopes: "true",
     state,
   });

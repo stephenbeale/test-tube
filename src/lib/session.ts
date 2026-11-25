@@ -4,6 +4,7 @@ import { db } from "./db";
 import { sign, verify } from "./crypto";
 
 const COOKIE = "tt_session";
+const CHANNEL_COOKIE = "tt_channel";
 const MAX_AGE = 60 * 60 * 24 * 30;
 
 export type Channel = {
@@ -13,6 +14,8 @@ export type Channel = {
   reachMetrics: boolean | null;
   lastSyncedAt: string | null;
   lastSyncError: string | null;
+  /** Every channel the user has connected, for the switcher. */
+  channels: { id: string; title: string }[];
 };
 
 export async function createSession(userId: string) {
@@ -27,7 +30,9 @@ export async function createSession(userId: string) {
 }
 
 export async function destroySession() {
-  (await cookies()).delete(COOKIE);
+  const jar = await cookies();
+  jar.delete(COOKIE);
+  jar.delete(CHANNEL_COOKIE);
 }
 
 export async function getUserId(): Promise<string | null> {
@@ -41,17 +46,29 @@ export async function getUserId(): Promise<string | null> {
   return userId;
 }
 
-/** The signed-in user's channel, or a redirect to the landing page. */
+/** Remembers which of the user's channels is selected. Ownership is checked on every read. */
+export async function setActiveChannel(channelId: string) {
+  (await cookies()).set(CHANNEL_COOKIE, channelId, {
+    httpOnly: true,
+    sameSite: "lax",
+    secure: process.env.NODE_ENV === "production",
+    path: "/",
+    maxAge: MAX_AGE,
+  });
+}
+
+/** The signed-in user's selected channel (or their first), or a redirect to the landing page. */
 export async function requireChannel(): Promise<Channel> {
   const userId = await getUserId();
   if (!userId) redirect("/");
   const c = await db();
   const r = await c.execute({
-    sql: "SELECT id, title, is_demo, reach_metrics, last_synced_at, last_sync_error FROM channels WHERE user_id = ? LIMIT 1",
+    sql: "SELECT id, title, is_demo, reach_metrics, last_synced_at, last_sync_error FROM channels WHERE user_id = ? ORDER BY title COLLATE NOCASE",
     args: [userId],
   });
-  const row = r.rows[0];
-  if (!row) redirect("/?error=no_channel");
+  if (!r.rows.length) redirect("/?error=no_channel");
+  const wanted = (await cookies()).get(CHANNEL_COOKIE)?.value;
+  const row = r.rows.find((x) => String(x.id) === wanted) ?? r.rows[0];
   return {
     id: String(row.id),
     title: String(row.title),
@@ -59,5 +76,6 @@ export async function requireChannel(): Promise<Channel> {
     reachMetrics: row.reach_metrics == null ? null : Number(row.reach_metrics) === 1,
     lastSyncedAt: row.last_synced_at as string | null,
     lastSyncError: row.last_sync_error as string | null,
+    channels: r.rows.map((x) => ({ id: String(x.id), title: String(x.title) })),
   };
 }

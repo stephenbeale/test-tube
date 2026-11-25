@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { newId } from "@/lib/crypto";
 import { db } from "@/lib/db";
 import { ptDate } from "@/lib/dates";
-import { destroySession, requireChannel } from "@/lib/session";
+import { destroySession, requireChannel, setActiveChannel } from "@/lib/session";
 import { syncChannel } from "@/lib/sync";
 
 export async function syncNow() {
@@ -38,6 +38,14 @@ export async function deleteNote(formData: FormData) {
   const c = await db();
   await c.execute({ sql: "DELETE FROM changes WHERE id = ? AND channel_id = ? AND field = 'note'", args: [String(formData.get("id")), channel.id] });
   revalidatePath("/", "layout");
+}
+
+export async function switchChannel(formData: FormData) {
+  const channel = await requireChannel();
+  const id = String(formData.get("channelId") ?? "");
+  if (channel.channels.some((c) => c.id === id)) await setActiveChannel(id);
+  revalidatePath("/", "layout");
+  redirect("/dashboard");
 }
 
 export async function signOut() {
