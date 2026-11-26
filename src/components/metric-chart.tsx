@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { EventForm } from "@/components/event-form";
 import { fmtDate, fmtMetric } from "@/lib/format";
 import type { MetricKey } from "@/lib/impact";
 
@@ -16,10 +17,24 @@ function niceMax(v: number) {
   return [1, 2, 4, 8, 10].map((m) => m * p).find((m) => m >= v)!;
 }
 
-export function MetricChart({ points, markers, metric, label }: { points: Point[]; markers: Marker[]; metric: MetricKey; label: string }) {
+/** With `record`, clicking a day opens a form to record a change or note on that date. */
+export function MetricChart({
+  points,
+  markers,
+  metric,
+  label,
+  record,
+}: {
+  points: Point[];
+  markers: Marker[];
+  metric: MetricKey;
+  label: string;
+  record?: { action: (formData: FormData) => Promise<void>; videoId: string; today: string };
+}) {
   const wrap = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(800);
   const [hover, setHover] = useState<number | null>(null);
+  const [picked, setPicked] = useState<number | null>(null);
 
   useEffect(() => {
     const el = wrap.current!;
@@ -27,6 +42,13 @@ export function MetricChart({ points, markers, metric, label }: { points: Point[
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  useEffect(() => {
+    if (picked == null) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setPicked(null);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [picked]);
 
   const data = points.filter((p) => p.value != null);
   if (data.length < 2) {
@@ -60,12 +82,14 @@ export function MetricChart({ points, markers, metric, label }: { points: Point[
         height={H}
         role="img"
         aria-label={`${label} per day with change markers`}
+        className={record ? "cursor-crosshair" : undefined}
         onPointerMove={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
           const i = Math.round(((e.clientX - r.left - PAD.left) / innerW) * (points.length - 1));
           setHover(Math.max(0, Math.min(points.length - 1, i)));
         }}
         onPointerLeave={() => setHover(null)}
+        onClick={() => record && hover != null && points[hover].date <= record.today && setPicked(hover)}
       >
         {ticks.map((t) => (
           <g key={t}>
@@ -96,6 +120,7 @@ export function MetricChart({ points, markers, metric, label }: { points: Point[
           );
         })}
         <path d={path} fill="none" className="stroke-accent" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+        {picked != null && <line x1={x(picked)} x2={x(picked)} y1={PAD.top} y2={PAD.top + innerH} className="stroke-ink" strokeWidth={1.5} />}
         {hp && hover != null && (
           <g>
             <line x1={x(hover)} x2={x(hover)} y1={PAD.top} y2={PAD.top + innerH} className="stroke-faint" />
@@ -103,7 +128,7 @@ export function MetricChart({ points, markers, metric, label }: { points: Point[
           </g>
         )}
       </svg>
-      {hp && hover != null && (
+      {hp && hover != null && picked == null && (
         <div
           className="pointer-events-none absolute top-10 z-10 w-max max-w-56 rounded-md border border-line bg-surface px-2.5 py-1.5 text-xs shadow-md"
           style={x(hover) > width / 2 ? { right: width - x(hover) + 10 } : { left: x(hover) + 10 }}
@@ -115,6 +140,26 @@ export function MetricChart({ points, markers, metric, label }: { points: Point[
               <span className="font-semibold text-ink">{m.n}</span> {m.label}
             </div>
           ))}
+          {record && hp.date <= record.today && <div className="mt-1 text-faint">Click to record a change</div>}
+        </div>
+      )}
+      {record && picked != null && (
+        <div
+          role="dialog"
+          aria-label={`Record a change on ${fmtDate(points[picked].date)}`}
+          className="absolute top-10 z-20 w-[28rem] max-w-[calc(100%-1rem)] rounded-lg border border-line bg-surface p-3 shadow-lg"
+          style={x(picked) > width / 2 ? { right: Math.max(8, width - x(picked) + 10) } : { left: Math.min(x(picked) + 10, width - 8) }}
+        >
+          <div className="mb-2 text-sm font-medium">{fmtDate(points[picked].date)}: what happened?</div>
+          <EventForm
+            key={points[picked].date}
+            action={record.action}
+            videoId={record.videoId}
+            today={record.today}
+            fixedDate={points[picked].date}
+            onDone={() => setPicked(null)}
+            autoFocus
+          />
         </div>
       )}
     </div>

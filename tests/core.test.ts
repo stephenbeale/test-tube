@@ -3,10 +3,12 @@ import { test } from "node:test";
 import { diffTags, diffVideo, type Tracked } from "../src/lib/diff";
 import { aggregate, computeImpact, type Day } from "../src/lib/impact";
 import { addDays, daysBetween } from "../src/lib/dates";
-import { getVideos, listUploadIds, normaliseCtr } from "../src/lib/youtube";
+import { getRetention, getVideos, listUploadIds, normaliseCtr } from "../src/lib/youtube";
+import { curveMean, retentionRanges, watchingAt } from "../src/lib/retention";
+import { demoRetention } from "../src/lib/demo";
 
 const base: Tracked = { title: "A", description: "d", tags: ["x"], categoryId: "28", privacyStatus: "public", thumbnailHash: "h1" };
-const day = (date: string, impressions: number | null, ctr: number | null, views = 100): Day => ({ date, views, watchMinutes: views * 2, avgViewDuration: 120, subsGained: 0, impressions, ctr });
+const day = (date: string, impressions: number | null, ctr: number | null, views = 100): Day => ({ date, views, watchMinutes: views * 2, avgViewDuration: 120, avgViewPct: 40, subsGained: 0, impressions, ctr });
 
 test("diffVideo reports only fields that changed", () => {
   assert.deepEqual(diffVideo(base, base), []);
@@ -85,4 +87,56 @@ test("listUploadIds and getVideos drop videos repeated across playlist pages", a
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("aggregate weights avg % viewed by views and skips days without it", () => {
+  const days = [
+    { ...day("2026-01-01", null, null, 100), avgViewPct: 30 },
+    { ...day("2026-01-02", null, null, 300), avgViewPct: 50 },
+    { ...day("2026-01-03", null, null, 1000), avgViewPct: null },
+  ];
+  assert.equal(aggregate(days, "avgViewPct"), 45);
+  assert.equal(aggregate([{ ...day("2026-01-01", null, null), avgViewPct: null }], "avgViewPct"), null);
+});
+
+test("retentionRanges leaves out the change day and waits for enough days after", () => {
+  // today 2026-03-20, so the last day with analytics is 2026-03-18.
+  const r = retentionRanges("2026-03-10", 7, "2026-03-20");
+  assert.deepEqual(r.before, { start: "2026-03-03", end: "2026-03-09" });
+  assert.deepEqual(r.after, { start: "2026-03-11", end: "2026-03-17" });
+  const clipped = retentionRanges("2026-03-10", 28, "2026-03-20");
+  assert.deepEqual(clipped.after, { start: "2026-03-11", end: "2026-03-18" });
+  const early = retentionRanges("2026-03-16", 7, "2026-03-20");
+  assert.equal(early.after, null);
+  assert.equal(early.daysAfter, 2);
+});
+
+test("getRetention asks for the elapsed-time curve and falls back without relative performance", async () => {
+  const realFetch = globalThis.fetch;
+  const asked: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    asked.push(url.searchParams.get("metrics")!);
+    assert.equal(url.searchParams.get("dimensions"), "elapsedVideoTimeRatio");
+    assert.equal(url.searchParams.get("filters"), "video==v1");
+    if (url.searchParams.get("metrics")!.includes("relative")) return new Response(JSON.stringify({ error: { message: "bad metric" } }), { status: 400 });
+    return new Response(JSON.stringify({ columnHeaders: [{ name: "elapsedVideoTimeRatio" }, { name: "audienceWatchRatio" }], rows: [[0.01, 0.9], [0.02, 0.8]] }), { status: 200 });
+  }) as typeof fetch;
+  try {
+    const pts = await getRetention("t", "v1", "2026-01-01", "2026-01-07");
+    assert.deepEqual(pts, [{ at: 0.01, watching: 0.9, relative: null }, { at: 0.02, watching: 0.8, relative: null }]);
+    assert.equal(asked.length, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("demo retention curves start near full, decline, and differ between ranges", () => {
+  const today = new Date().toISOString().slice(0, 10);
+  const before = demoRetention("demo-keyboard", { start: addDays(today, -30), end: addDays(today, -24) });
+  const after = demoRetention("demo-keyboard", { start: addDays(today, -22), end: addDays(today, -16) });
+  assert.equal(before.length, 100);
+  assert.ok(watchingAt(before, 0)! > 0.85 && watchingAt(before, 0.9)! < watchingAt(before, 0.1)!);
+  assert.notEqual(curveMean(before), curveMean(after));
+  assert.deepEqual(demoRetention("demo-keyboard", { start: "2000-01-01", end: "2000-01-07" }), []);
 });

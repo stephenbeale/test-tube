@@ -58,6 +58,8 @@ export type VideoState = {
   tags: string[];
   categoryId: string | null;
   privacyStatus: string | null;
+  /** Scheduled release time, set while a private video is scheduled to go public. */
+  publishAt: string | null;
   publishedAt: string | null;
   thumbnailUrl: string | null;
 };
@@ -72,7 +74,7 @@ type ApiVideo = {
     publishedAt?: string;
     thumbnails?: Record<string, { url: string }>;
   };
-  status?: { privacyStatus?: string };
+  status?: { privacyStatus?: string; publishAt?: string };
 };
 
 export async function getVideos(token: string, requested: string[]): Promise<VideoState[]> {
@@ -91,6 +93,7 @@ export async function getVideos(token: string, requested: string[]): Promise<Vid
         tags: v.snippet.tags ?? [],
         categoryId: v.snippet.categoryId ?? null,
         privacyStatus: v.status?.privacyStatus ?? null,
+        publishAt: v.status?.publishAt ?? null,
         publishedAt: v.snippet.publishedAt ?? null,
         // Always the same size: comparing different sizes would look like a change.
         thumbnailUrl: v.snippet.thumbnails?.high?.url ?? v.snippet.thumbnails?.default?.url ?? null,
@@ -105,25 +108,26 @@ export type DailyRow = {
   views: number;
   watchMinutes: number;
   avgViewDuration: number;
+  avgViewPct: number | null;
   subsGained: number;
   impressions: number | null;
   ctr: number | null;
 };
 
-const CORE = ["views", "estimatedMinutesWatched", "averageViewDuration", "subscribersGained"];
+const CORE = ["views", "estimatedMinutesWatched", "averageViewDuration", "averageViewPercentage", "subscribersGained"];
 // Thumbnail impressions and click-through rate. Reports differ on whether the
 // Analytics API accepts these for every channel, so callers fall back to CORE.
 const REACH = ["videoThumbnailImpressions", "videoThumbnailImpressionsClickRate"];
 
-async function report(token: string, videoId: string, start: string, end: string, metrics: string[]) {
+async function report(token: string, videoId: string, start: string, end: string, metrics: string[], dimension = "day") {
   const p = new URLSearchParams({
     ids: "channel==MINE",
     startDate: start,
     endDate: end,
-    dimensions: "day",
+    dimensions: dimension,
     filters: `video==${videoId}`,
     metrics: metrics.join(","),
-    sort: "day",
+    sort: dimension,
   });
   return get<{ columnHeaders: { name: string }[]; rows?: (string | number)[][] }>(`${ANALYTICS}?${p}`, token);
 }
@@ -156,6 +160,7 @@ export async function getDailyMetrics(
     views: num(row, "views") ?? 0,
     watchMinutes: num(row, "estimatedMinutesWatched") ?? 0,
     avgViewDuration: num(row, "averageViewDuration") ?? 0,
+    avgViewPct: num(row, "averageViewPercentage"),
     subsGained: num(row, "subscribersGained") ?? 0,
     impressions: num(row, REACH[0]),
     ctr: num(row, REACH[1]),
@@ -168,4 +173,34 @@ export function normaliseCtr(rows: DailyRow[]): DailyRow[] {
   const max = Math.max(0, ...rows.map((r) => r.ctr ?? 0));
   if (max === 0 || max > 1) return rows;
   return rows.map((r) => (r.ctr == null ? r : { ...r, ctr: r.ctr * 100 }));
+}
+
+export type RetentionPoint = {
+  /** Position in the video, 0 to 1. */
+  at: number;
+  /** Viewers still watching at this point, relative to views; above 1 means rewatching. */
+  watching: number;
+  /** 0 to 1 against YouTube videos of similar length; 0.5 is typical. Null if not reported. */
+  relative: number | null;
+};
+
+/**
+ * Audience retention curve for one video over a date range: up to 100 points from start to end.
+ * Empty when YouTube has too few views to report it.
+ */
+export async function getRetention(token: string, videoId: string, start: string, end: string): Promise<RetentionPoint[]> {
+  const dim = "elapsedVideoTimeRatio";
+  let r;
+  try {
+    r = await report(token, videoId, start, end, ["audienceWatchRatio", "relativeRetentionPerformance"], dim);
+  } catch (e) {
+    if (!(e instanceof ApiError) || e.status !== 400) throw e;
+    r = await report(token, videoId, start, end, ["audienceWatchRatio"], dim);
+  }
+  const col = Object.fromEntries(r.columnHeaders.map((h, i) => [h.name, i]));
+  return (r.rows ?? []).map((row) => ({
+    at: Number(row[col[dim]]),
+    watching: Number(row[col.audienceWatchRatio]),
+    relative: "relativeRetentionPerformance" in col ? Number(row[col.relativeRetentionPerformance]) : null,
+  }));
 }

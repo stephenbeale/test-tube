@@ -2,6 +2,7 @@ import type { InStatement } from "@libsql/client";
 import { db } from "./db";
 import { newId, sha256 } from "./crypto";
 import { addDays, ptDate } from "./dates";
+import type { RetentionPoint } from "./youtube";
 
 export const DEMO_USER = "demo-user";
 export const DEMO_CHANNEL = "demo-channel";
@@ -111,11 +112,44 @@ export async function seedDemo(): Promise<void> {
       const ctr = v.ctr * ctrMult * noise(0.06);
       const views = Math.round(((impressions * ctr) / 100) * 1.2 * newsletter);
       const avd = v.avd * noise(0.04);
+      // Implied length of avd + 5 minutes, so % viewed tracks duration.
+      const avgPct = (avd / (v.avd + 300)) * 100;
       stmts.push({
-        sql: "INSERT OR REPLACE INTO daily_metrics (video_id, date, views, watch_minutes, avg_view_duration, subs_gained, impressions, ctr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        args: [v.id, date, views, (views * avd) / 60, avd, Math.round(views * 0.004), impressions, ctr],
+        sql: "INSERT OR REPLACE INTO daily_metrics (video_id, date, views, watch_minutes, avg_view_duration, avg_view_pct, subs_gained, impressions, ctr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [v.id, date, views, (views * avd) / 60, avd, avgPct, Math.round(views * 0.004), impressions, ctr],
       });
     }
   });
   await c.batch(stmts, "write");
+}
+
+/**
+ * A plausible retention curve for a demo video: a sharp drop in the first seconds, a steady decline,
+ * then a dip at the end screen. Its mean matches the video's average % viewed, nudged per range so
+ * before and after differ. Empty for ranges before the video was published.
+ */
+export function demoRetention(videoId: string, range: { start: string; end: string }): RetentionPoint[] {
+  const v = VIDEOS.find((x) => x.id === videoId);
+  if (!v || range.end < addDays(ptDate(), -v.age)) return [];
+  const rand = rng([...videoId, ...range.start].reduce((h, ch) => Math.imul(h, 31) + ch.charCodeAt(0), 7));
+  // Small nudge only: the demo daily % viewed stays flat across changes, so the curves should too.
+  const target = (v.avd / (v.avd + 300)) * (0.98 + rand() * 0.04);
+  // Early drop of `hook`, then exponential decay with rate k; find k so the mean hits target.
+  const hook = 0.28;
+  const mean = (k: number) => (1 - hook) * ((1 - Math.exp(-k)) / k) + hook / 30;
+  let lo = 0.01;
+  let hi = 20;
+  for (let i = 0; i < 40; i++) {
+    const mid = (lo + hi) / 2;
+    if (mean(mid) > target) lo = mid;
+    else hi = mid;
+  }
+  const k = (lo + hi) / 2;
+  const relative = Math.min(0.95, Math.max(0.05, 0.5 + (target - 0.45) * 2.5));
+  return Array.from({ length: 100 }, (_, i) => {
+    const at = (i + 1) / 100;
+    const endScreen = at > 0.94 ? 1 - (at - 0.94) * 6 : 1;
+    const watching = ((1 - hook) * Math.exp(-k * at) + hook * Math.exp(-30 * at)) * endScreen * (1 + (rand() - 0.5) * 0.03);
+    return { at, watching, relative: Math.min(1, Math.max(0, relative + (rand() - 0.5) * 0.1)) };
+  });
 }

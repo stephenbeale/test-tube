@@ -9,9 +9,9 @@ import { getDailyMetrics, getVideos, listUploadIds, type VideoState } from "./yo
 const MAX_VIDEOS = 200; // newest uploads watched for changes
 const MAX_METRIC_VIDEOS = 40; // videos whose daily analytics are pulled per sync
 const METRIC_DAYS = 90;
-const DATA_LAG_DAYS = 2; // Analytics for the last couple of days is incomplete
+export const DATA_LAG_DAYS = 2; // Analytics for the last couple of days is incomplete
 
-async function accessToken(channelId: string): Promise<string> {
+export async function accessToken(channelId: string): Promise<string> {
   const c = await db();
   const row = (await c.execute({ sql: "SELECT access_token_enc, refresh_token_enc, token_expires_at FROM channels WHERE id = ?", args: [channelId] })).rows[0];
   if (!row?.refresh_token_enc) throw new Error("Channel has no refresh token. Reconnect YouTube.");
@@ -87,7 +87,7 @@ async function runSync(channelId: string): Promise<SyncResult> {
   const thumbs = await mapLimit(videos, 8, (v) => fetchThumbnail(v.thumbnailUrl));
 
   const existing = new Map(
-    (await c.execute({ sql: "SELECT id, title, description, tags, category_id, privacy_status, thumbnail_hash FROM videos WHERE channel_id = ?", args: [channelId] })).rows.map(
+    (await c.execute({ sql: "SELECT id, title, description, tags, category_id, privacy_status, publish_at, thumbnail_hash FROM videos WHERE channel_id = ?", args: [channelId] })).rows.map(
       (r) => [String(r.id), r],
     ),
   );
@@ -110,10 +110,14 @@ async function runSync(channelId: string): Promise<SyncResult> {
     if (!prev) {
       // First sighting is the baseline, not a change.
       stmts.push({
-        sql: "INSERT INTO videos (id, channel_id, title, description, tags, category_id, privacy_status, published_at, thumbnail_hash, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
-        args: [v.id, channelId, v.title, v.description, JSON.stringify(v.tags), v.categoryId, v.privacyStatus, v.publishedAt, thumb?.hash ?? null, nowIso],
+        sql: "INSERT INTO videos (id, channel_id, title, description, tags, category_id, privacy_status, publish_at, published_at, thumbnail_hash, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING",
+        args: [v.id, channelId, v.title, v.description, JSON.stringify(v.tags), v.categoryId, v.privacyStatus, v.publishAt, v.publishedAt, thumb?.hash ?? null, nowIso],
       });
       return;
+    }
+    // Not a tracked change: only used to group scheduled videos on the dashboard.
+    if ((prev.publish_at ?? null) !== v.publishAt) {
+      stmts.push({ sql: "UPDATE videos SET publish_at = ? WHERE id = ?", args: [v.publishAt, v.id] });
     }
     const before: Tracked = {
       title: String(prev.title),
@@ -158,8 +162,8 @@ async function runSync(channelId: string): Promise<SyncResult> {
     if (r.rows.length === 0) continue;
     await c.batch(
       r.rows.map((d) => ({
-        sql: "INSERT OR REPLACE INTO daily_metrics (video_id, date, views, watch_minutes, avg_view_duration, subs_gained, impressions, ctr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        args: [videoId, d.date, d.views, d.watchMinutes, d.avgViewDuration, d.subsGained, d.impressions, d.ctr],
+        sql: "INSERT OR REPLACE INTO daily_metrics (video_id, date, views, watch_minutes, avg_view_duration, avg_view_pct, subs_gained, impressions, ctr) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        args: [videoId, d.date, d.views, d.watchMinutes, d.avgViewDuration, d.avgViewPct, d.subsGained, d.impressions, d.ctr],
       })),
       "write",
     );

@@ -5,18 +5,21 @@ export type Day = {
   views: number;
   watchMinutes: number;
   avgViewDuration: number;
+  /** Average percentage of the video watched per view. */
+  avgViewPct: number | null;
   subsGained: number;
   impressions: number | null;
   ctr: number | null;
 };
 
-export type MetricKey = "ctr" | "views" | "impressions" | "avgViewDuration" | "watchMinutes";
+export type MetricKey = "ctr" | "views" | "impressions" | "avgViewDuration" | "avgViewPct" | "watchMinutes";
 
 export const METRICS: { key: MetricKey; label: string; unit: "pct" | "count" | "duration" | "minutes" }[] = [
   { key: "ctr", label: "Click-through rate", unit: "pct" },
   { key: "views", label: "Views / day", unit: "count" },
   { key: "impressions", label: "Impressions / day", unit: "count" },
   { key: "avgViewDuration", label: "Avg view duration", unit: "duration" },
+  { key: "avgViewPct", label: "Avg % viewed", unit: "pct" },
   { key: "watchMinutes", label: "Watch time / day", unit: "minutes" },
 ];
 
@@ -37,6 +40,11 @@ export function aggregate(days: Day[], key: MetricKey): number | null {
     case "avgViewDuration": {
       const v = sum((d) => d.views);
       return v > 0 ? sum((d) => d.views * d.avgViewDuration) / v : null;
+    }
+    case "avgViewPct": {
+      const withData = days.filter((d) => d.avgViewPct != null);
+      const v = withData.reduce((s, d) => s + d.views, 0);
+      return v > 0 ? withData.reduce((s, d) => s + d.views * d.avgViewPct!, 0) / v : null;
     }
     case "views":
       return sum((d) => d.views) / days.length;

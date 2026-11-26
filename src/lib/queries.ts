@@ -1,16 +1,31 @@
 import { db } from "./db";
 import type { Day } from "./impact";
 
+export type Visibility = "public" | "scheduled" | "unlisted" | "private";
+
+/** A private video with a release time is scheduled. Unknown status counts as public. */
+export function visibilityOf(privacyStatus: string | null, publishAt: string | null): Visibility {
+  if (privacyStatus === "private") return publishAt ? "scheduled" : "private";
+  if (privacyStatus === "unlisted") return "unlisted";
+  return "public";
+}
+
+/** SQL condition for videos shown in the main change log and video list. */
+const IS_PUBLIC = "(v.privacy_status IS NULL OR v.privacy_status = 'public')";
+
 export type VideoRow = {
   id: string;
   title: string;
   publishedAt: string | null;
+  publishAt: string | null;
+  visibility: Visibility;
   thumbnailHash: string | null;
   changeCount: number;
   views28: number;
 };
 
-export type ChangeItem = { id: string; field: string; oldValue: string | null; newValue: string | null };
+/** `manual` items were recorded by the creator rather than detected by a sync, so they can be deleted. */
+export type ChangeItem = { id: string; field: string; oldValue: string | null; newValue: string | null; manual: boolean };
 /** Everything detected on one video in one sync: the unit creators think of as "a change". */
 export type ChangeGroup = {
   key: string;
@@ -25,7 +40,7 @@ export type ChangeGroup = {
 export async function listVideos(channelId: string, since28: string): Promise<VideoRow[]> {
   const c = await db();
   const r = await c.execute({
-    sql: `SELECT v.id, v.title, v.published_at, v.thumbnail_hash,
+    sql: `SELECT v.id, v.title, v.published_at, v.publish_at, v.privacy_status, v.thumbnail_hash,
             (SELECT COUNT(DISTINCT detected_at) FROM changes ch WHERE ch.video_id = v.id AND ch.field != 'note') AS change_count,
             (SELECT COALESCE(SUM(views), 0) FROM daily_metrics m WHERE m.video_id = v.id AND m.date >= ?) AS views28
           FROM videos v WHERE v.channel_id = ? ORDER BY v.published_at DESC`,
@@ -35,18 +50,23 @@ export async function listVideos(channelId: string, since28: string): Promise<Vi
     id: String(x.id),
     title: String(x.title),
     publishedAt: x.published_at as string | null,
+    publishAt: x.publish_at as string | null,
+    visibility: visibilityOf(x.privacy_status as string | null, x.publish_at as string | null),
     thumbnailHash: x.thumbnail_hash as string | null,
     changeCount: Number(x.change_count),
     views28: Number(x.views28),
   }));
 }
 
-export async function listChangeGroups(channelId: string, opts: { videoId?: string; limit?: number } = {}): Promise<ChangeGroup[]> {
+export async function listChangeGroups(
+  channelId: string,
+  opts: { videoId?: string; limit?: number; publicOnly?: boolean } = {},
+): Promise<ChangeGroup[]> {
   const c = await db();
   const r = await c.execute({
-    sql: `SELECT ch.id, ch.video_id, ch.field, ch.old_value, ch.new_value, ch.detected_at, ch.change_date, v.title, v.thumbnail_hash
+    sql: `SELECT ch.id, ch.video_id, ch.field, ch.old_value, ch.new_value, ch.source, ch.detected_at, ch.change_date, v.title, v.thumbnail_hash
           FROM changes ch JOIN videos v ON v.id = ch.video_id
-          WHERE ch.channel_id = ? ${opts.videoId ? "AND ch.video_id = ?" : ""}
+          WHERE ch.channel_id = ? ${opts.videoId ? "AND ch.video_id = ?" : ""} ${opts.publicOnly ? `AND ${IS_PUBLIC}` : ""}
           ORDER BY ch.detected_at DESC, ch.field`,
     args: opts.videoId ? [channelId, opts.videoId] : [channelId],
   });
@@ -67,7 +87,13 @@ export async function listChangeGroups(channelId: string, opts: { videoId?: stri
       };
       groups.set(key, g);
     }
-    g.items.push({ id: String(x.id), field: String(x.field), oldValue: x.old_value as string | null, newValue: x.new_value as string | null });
+    g.items.push({
+      id: String(x.id),
+      field: String(x.field),
+      oldValue: x.old_value as string | null,
+      newValue: x.new_value as string | null,
+      manual: x.source === "manual" || x.field === "note",
+    });
   }
   return [...groups.values()];
 }
@@ -83,7 +109,7 @@ export async function getDays(videoIds: string[]): Promise<Map<string, Day[]>> {
   if (videoIds.length === 0) return out;
   const c = await db();
   const r = await c.execute({
-    sql: `SELECT video_id, date, views, watch_minutes, avg_view_duration, subs_gained, impressions, ctr
+    sql: `SELECT video_id, date, views, watch_minutes, avg_view_duration, avg_view_pct, subs_gained, impressions, ctr
           FROM daily_metrics WHERE video_id IN (${videoIds.map(() => "?").join(",")}) ORDER BY date`,
     args: videoIds,
   });
@@ -95,6 +121,7 @@ export async function getDays(videoIds: string[]): Promise<Map<string, Day[]>> {
       views: Number(x.views),
       watchMinutes: Number(x.watch_minutes),
       avgViewDuration: Number(x.avg_view_duration),
+      avgViewPct: x.avg_view_pct == null ? null : Number(x.avg_view_pct),
       subsGained: Number(x.subs_gained),
       impressions: x.impressions == null ? null : Number(x.impressions),
       ctr: x.ctr == null ? null : Number(x.ctr),

@@ -3,14 +3,18 @@ import { FieldChips, Header, ImpactSummary, parseWindow, Thumb, WindowPicker } f
 import { addDays, ptDate } from "@/lib/dates";
 import { fmtDateYear, fmtMetric } from "@/lib/format";
 import { computeImpact } from "@/lib/impact";
-import { getDays, listChangeGroups, listVideos } from "@/lib/queries";
+import { getDays, listChangeGroups, listVideos, type VideoRow, type Visibility } from "@/lib/queries";
 import { requireChannel } from "@/lib/session";
 
 export default async function Dashboard({ searchParams }: PageProps<"/dashboard">) {
   const channel = await requireChannel();
   const window = parseWindow((await searchParams).w);
-  const [videos, groups] = await Promise.all([listVideos(channel.id, addDays(ptDate(), -30)), listChangeGroups(channel.id, { limit: 30 })]);
+  const [videos, groups] = await Promise.all([listVideos(channel.id, addDays(ptDate(), -30)), listChangeGroups(channel.id, { limit: 30, publicOnly: true })]);
   const days = await getDays([...new Set(groups.map((g) => g.videoId))]);
+  // Only public videos have numbers worth comparing; the rest are tucked into collapsed groups.
+  const byVisibility: Record<Visibility, VideoRow[]> = { public: [], scheduled: [], unlisted: [], private: [] };
+  for (const v of videos) byVisibility[v.visibility].push(v);
+  byVisibility.scheduled.sort((a, b) => (a.publishAt ?? "").localeCompare(b.publishAt ?? ""));
 
   return (
     <>
@@ -72,36 +76,69 @@ export default async function Dashboard({ searchParams }: PageProps<"/dashboard"
         {videos.length > 0 && (
           <section className="mt-12">
             <h2 className="text-lg font-semibold tracking-tight">Videos</h2>
-            <div className="mt-3 overflow-x-auto rounded-lg border border-line bg-surface">
-              <table className="w-full text-sm">
-                <thead className="text-left text-xs text-muted">
-                  <tr className="border-b border-line">
-                    <th className="px-4 py-2 font-medium">Video</th>
-                    <th className="px-4 py-2 font-medium whitespace-nowrap">Published</th>
-                    <th className="px-4 py-2 text-right font-medium">Changes</th>
-                    <th className="px-4 py-2 text-right font-medium whitespace-nowrap">Views, 28 days</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {videos.map((v) => (
-                    <tr key={v.id} className="border-b border-line last:border-0">
-                      <td className="px-4 py-2">
-                        <Link href={`/videos/${v.id}`} className="flex items-center gap-3 hover:underline">
-                          <Thumb hash={v.thumbnailHash} className="w-16 shrink-0" />
-                          <span className="line-clamp-2 min-w-40">{v.title}</span>
-                        </Link>
-                      </td>
-                      <td className="px-4 py-2 whitespace-nowrap text-muted">{v.publishedAt ? fmtDateYear(v.publishedAt) : "–"}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{v.changeCount || <span className="text-faint">0</span>}</td>
-                      <td className="px-4 py-2 text-right tabular-nums">{fmtMetric("views", v.views28)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            {byVisibility.public.length > 0 ? (
+              <VideoTable videos={byVisibility.public} />
+            ) : (
+              <p className="mt-3 text-sm text-muted">No public videos yet.</p>
+            )}
+            {HIDDEN_GROUPS.filter((g) => byVisibility[g.key].length > 0).map((g) => (
+              <details key={g.key} className="group mt-3 rounded-lg border border-line bg-surface">
+                <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-sm [&::-webkit-details-marker]:hidden">
+                  <svg viewBox="0 0 12 12" className="size-3 shrink-0 text-muted transition-transform group-open:rotate-90" aria-hidden>
+                    <path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span className="font-medium">{g.label}</span>
+                  <span className="text-muted">{byVisibility[g.key].length}</span>
+                  <span className="ml-auto hidden text-xs text-faint sm:inline">{g.hint}</span>
+                </summary>
+                <VideoTable videos={byVisibility[g.key]} scheduled={g.key === "scheduled"} inset />
+              </details>
+            ))}
           </section>
         )}
       </main>
     </>
+  );
+}
+
+const HIDDEN_GROUPS: { key: Exclude<Visibility, "public">; label: string; hint: string }[] = [
+  { key: "scheduled", label: "Scheduled", hint: "Not live yet, so there's nothing to measure" },
+  { key: "unlisted", label: "Unlisted", hint: "Only people with the link can watch" },
+  { key: "private", label: "Private", hint: "Only you can watch" },
+];
+
+/** `inset` drops the card frame when the table sits inside a collapsible group. */
+function VideoTable({ videos, scheduled = false, inset = false }: { videos: VideoRow[]; scheduled?: boolean; inset?: boolean }) {
+  return (
+    <div className={`overflow-x-auto ${inset ? "border-t border-line" : "mt-3 rounded-lg border border-line bg-surface"}`}>
+      <table className="w-full text-sm">
+        <thead className="text-left text-xs text-muted">
+          <tr className="border-b border-line">
+            <th className="px-4 py-2 font-medium">Video</th>
+            <th className="px-4 py-2 font-medium whitespace-nowrap">{scheduled ? "Goes live" : "Published"}</th>
+            <th className="px-4 py-2 text-right font-medium">Changes</th>
+            <th className="px-4 py-2 text-right font-medium whitespace-nowrap">Views, 28 days</th>
+          </tr>
+        </thead>
+        <tbody>
+          {videos.map((v) => {
+            const date = scheduled ? v.publishAt : v.publishedAt;
+            return (
+              <tr key={v.id} className="border-b border-line last:border-0">
+                <td className="px-4 py-2">
+                  <Link href={`/videos/${v.id}`} className="flex items-center gap-3 hover:underline">
+                    <Thumb hash={v.thumbnailHash} className="w-16 shrink-0" />
+                    <span className="line-clamp-2 min-w-40">{v.title}</span>
+                  </Link>
+                </td>
+                <td className="px-4 py-2 whitespace-nowrap text-muted">{date ? fmtDateYear(date) : "–"}</td>
+                <td className="px-4 py-2 text-right tabular-nums">{v.changeCount || <span className="text-faint">0</span>}</td>
+                <td className="px-4 py-2 text-right tabular-nums">{fmtMetric("views", v.views28)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

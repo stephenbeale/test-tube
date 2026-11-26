@@ -66,7 +66,36 @@ CREATE TABLE IF NOT EXISTS daily_metrics (
   ctr REAL,
   PRIMARY KEY (video_id, date)
 );
+-- Audience retention curve for one video over a date range; points is JSON RetentionPoint[].
+CREATE TABLE IF NOT EXISTS retention_curves (
+  video_id TEXT NOT NULL,
+  start_date TEXT NOT NULL,
+  end_date TEXT NOT NULL,
+  points TEXT NOT NULL,
+  fetched_at TEXT NOT NULL,
+  PRIMARY KEY (video_id, start_date, end_date)
+);
 `;
+
+/** Columns added after the first release. Adding one that already exists throws, which is fine. */
+const MIGRATIONS = [
+  // Scheduled release time; YouTube only reports it while a video is private and scheduled.
+  "ALTER TABLE videos ADD COLUMN publish_at TEXT",
+  // 'manual' for changes and notes the creator recorded by hand (deletable); NULL for ones a sync detected.
+  "ALTER TABLE changes ADD COLUMN source TEXT",
+  // Average percentage of the video watched per view; NULL for days synced before it was collected.
+  "ALTER TABLE daily_metrics ADD COLUMN avg_view_pct REAL",
+];
+
+async function migrate(c: Client) {
+  for (const sql of MIGRATIONS) {
+    try {
+      await c.execute(sql);
+    } catch (e) {
+      if (!/duplicate column/i.test(String(e))) throw e;
+    }
+  }
+}
 
 let client: Client | undefined;
 let ready: Promise<void> | undefined;
@@ -78,7 +107,7 @@ export async function db(): Promise<Client> {
       url: process.env.DATABASE_URL ?? "file:testtube.db",
       authToken: process.env.DATABASE_AUTH_TOKEN,
     });
-    ready = client.executeMultiple(SCHEMA);
+    ready = client.executeMultiple(SCHEMA).then(() => migrate(client!));
   }
   await ready;
   return client;
